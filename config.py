@@ -14,10 +14,9 @@ class MCTSConfig:
     pcr_fraction: float = 1.0
     fpu_reduction: float = 0.1
     c_puct: float = 1.5
-    dirichlet_alpha: float = 1.0
+    dirichlet_alpha: float = 0.5
     exploration_fraction: float = 0.25
-    temp_threshold: int = 12
-
+    temp_threshold: int = 10
 @dataclass
 class TrainConfig:
     batch_size: int = 256
