@@ -19,6 +19,7 @@ datasets/
 *.pickle
 
 logs/
+history
 *.log
 tfevents*
 
