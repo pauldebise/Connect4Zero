@@ -10,12 +10,14 @@ h5py==3.14.0
 idna==3.18
 keras==3.14.1
 libclang==18.1.1
+llvmlite==0.47.0
 Markdown==3.10.2
 markdown-it-py==4.2.0
 MarkupSafe==3.0.3
 mdurl==0.1.2
 ml_dtypes==0.5.4
 namex==0.1.0
+numba==0.65.1
 numpy==2.4.6
 onnx==1.22.0
 onnxruntime==1.27.0

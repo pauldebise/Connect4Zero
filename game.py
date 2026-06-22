@@ -1,9 +1,39 @@
 import numpy as np
+from numba import njit
+
+
+@njit(cache=True)
+def check_win_fast(bitboard):
+    """
+    Vérifie la victoire avec des opérations bit-à-bit.
+    Exécuté à la vitesse du C grâce à Numba.
+    """
+    # Vérification horizontale (décalage de 7 bits vers la droite)
+    m = bitboard & (bitboard >> np.uint64(7))
+    if m & (m >> np.uint64(14)):
+        return True
+
+    # Vérification diagonale descendante \ (décalage de 6 bits)
+    m = bitboard & (bitboard >> np.uint64(6))
+    if m & (m >> np.uint64(12)):
+        return True
+
+    # Vérification diagonale ascendante / (décalage de 8 bits)
+    m = bitboard & (bitboard >> np.uint64(8))
+    if m & (m >> np.uint64(16)):
+        return True
+
+    # Vérification verticale (décalage de 1 bit vers le haut)
+    m = bitboard & (bitboard >> np.uint64(1))
+    if m & (m >> np.uint64(2)):
+        return True
+
+    return False
+
 
 class Connect4Env:
     """
-    Environnement pour le jeu de Puissance 4.
-    Le plateau est représenté par une matrice NumPy de 6 lignes et 7 colonnes.
+    Environnement pour le jeu de Puissance 4 optimisé (Bitboards + NumPy hybride).
     Joueur 1 : 1
     Joueur 2 : -1
     Case vide : 0
@@ -12,91 +42,80 @@ class Connect4Env:
     def __init__(self):
         self.rows = 6
         self.cols = 7
-        self.board = np.zeros((self.rows, self.cols), dtype=int)
+        self.reset()
+
+    def reset(self):
+        """Réinitialise l'environnement."""
+        # --- État NumPy (pour la compatibilité) ---
+        self.board = np.zeros((self.rows, self.cols), dtype=np.int32)
         self.current_player = 1
+
+        # --- État Bitboard (pour la performance) ---
+        self.p1_board = np.uint64(0)
+        self.p2_board = np.uint64(0)
+        self.moves_played = 0
+
+        # Chaque colonne a une hauteur de base (0, 7, 14, 21, 28, 35, 42)
+        # La ligne "6" de chaque colonne sert de tampon pour éviter les débordements
+        self.heights = np.array([0, 7, 14, 21, 28, 35, 42], dtype=np.uint64)
+
+        return self.board.copy()
 
     def get_legal_moves(self):
         """Renvoie la liste des colonnes où un jeton peut être placé."""
-        return [c for c in range(self.cols) if self.board[0, c] == 0]
+        # Une colonne 'c' est jouable si sa hauteur actuelle ne touche pas la ligne tampon (c*7 + 5 est le max jouable)
+        return [c for c in range(self.cols) if self.heights[c] < np.uint64(c * 7 + 6)]
 
     def step(self, col):
         """
-        Place un jeton dans la colonne spécifiée pour le joueur actuel.
-        Change ensuite de joueur.
-        
-        Args:
-            col (int): Index de la colonne (0-6).
-            
-        Returns:
-            tuple: (nouvel_état, gagnant)
-                - gagnant: 1 ou -1 si victoire, 0 si match nul, None sinon.
+        Place un jeton et renvoie (nouvel_état, gagnant).
         """
+        # (Optionnel en RL pour gagner du temps : tu peux retirer cette vérification
+        # si ton agent masque déjà les actions illégales)
         if col not in self.get_legal_moves():
             raise ValueError(f"Action invalide : la colonne {col} est pleine ou hors limites.")
 
-        # Trouver la ligne la plus basse disponible
-        for r in range(self.rows - 1, -1, -1):
-            if self.board[r, col] == 0:
-                self.board[r, col] = self.current_player
-                break
+        # 1. Mise à jour des Bitboards
+        move = np.uint64(1) << self.heights[col]
 
+        if self.current_player == 1:
+            self.p1_board |= move
+        else:
+            self.p2_board |= move
+
+        # 2. Mise à jour ciblée du tableau NumPy (O(1) au lieu de boucler)
+        # On calcule la ligne NumPy (5 = bas, 0 = haut) correspondant à l'index binaire
+        row_numpy = 5 - int((self.heights[col] % np.uint64(7)))
+        self.board[row_numpy, col] = self.current_player
+
+        # 3. Incrémenter la hauteur et le compteur de coups
+        self.heights[col] += np.uint64(1)
+        self.moves_played += 1
+
+        # 4. Vérification du gagnant ultra-rapide
         winner = self.check_winner()
-        
-        # Changement de joueur
+
+        # 5. Changement de joueur
         self.current_player = -self.current_player
-        
+
         return self.board.copy(), winner
 
     def check_winner(self):
         """
-        Vérifie s'il y a un gagnant ou un match nul.
-        
-        Returns:
-            int or None: 1 ou -1 (gagnant), 0 (match nul), None (partie en cours).
+        Vérifie s'il y a un gagnant ou un match nul via le Bitboard.
         """
-        # Vérification horizontale
-        for r in range(self.rows):
-            for c in range(self.cols - 3):
-                window = self.board[r, c:c+4]
-                if abs(sum(window)) == 4:
-                    return window[0]
+        if check_win_fast(self.p1_board):
+            return 1
+        if check_win_fast(self.p2_board):
+            return -1
 
-        # Vérification verticale
-        for r in range(self.rows - 3):
-            for c in range(self.cols):
-                window = self.board[r:r+4, c]
-                if abs(sum(window)) == 4:
-                    return window[0]
-
-        # Diagonale descendante (\)
-        for r in range(self.rows - 3):
-            for c in range(self.cols - 3):
-                window = [self.board[r+i, c+i] for i in range(4)]
-                if abs(sum(window)) == 4:
-                    return window[0]
-
-        # Diagonale ascendante (/)
-        for r in range(3, self.rows):
-            for c in range(self.cols - 3):
-                window = [self.board[r-i, c+i] for i in range(4)]
-                if abs(sum(window)) == 4:
-                    return window[0]
-
-        # Match nul (grille pleine)
-        if len(self.get_legal_moves()) == 0:
+        if self.moves_played == 42:
             return 0
 
-        # La partie continue
         return None
 
     def get_state(self):
         """Renvoie une copie de l'état actuel du plateau."""
-        return self.board.copy()
-
-    def reset(self):
-        """Réinitialise l'environnement."""
-        self.board = np.zeros((self.rows, self.cols), dtype=int)
-        self.current_player = 1
         return self.board.copy()
 
     def render(self):
@@ -110,8 +129,10 @@ class Connect4Env:
 
 if __name__ == "__main__":
     env = Connect4Env()
-    env.step(3) # Le joueur 1 joue au centre
-    env.step(3) # Le joueur -1 joue au centre, par-dessus
+    env.step(3)  # Joueur 1 (X)
+    env.step(3)  # Joueur -1 (O)
+
+    print("État initialisé (Format NumPy intact) :")
     print(env.get_state())
-    print(f"Coups légaux restants : {env.get_legal_moves()}")
+    print(f"\nCoups légaux restants : {env.get_legal_moves()}")
     print(f"Gagnant actuel : {env.check_winner()}")
