@@ -91,7 +91,7 @@ def run_matchup(path_a, path_b, num_games=20):
 
 
 def main():
-    # --- SILENCE ABSOLU DE TENSORFLOW (Confiné au processus maître) ---
+    # --- SILENCE ABSOLU DE TENSORFLOW ---
     os.environ['TF_ENABLE_ONEDNN_OPTS'] = '0'
     os.environ['TF_CPP_MIN_LOG_LEVEL'] = '3'
     import tensorflow as tf
@@ -101,22 +101,30 @@ def main():
     # ------------------------------------------------------------------
 
     print("=" * 60)
-    print(" 🏆 DÉMARRAGE DU TRAQUEUR ELO (GAUNTLET HISTORIQUE) ")
+    print(" 🏆 DÉMARRAGE DU TRAQUEUR ELO (CHECKPOINTS STEPS) ")
     print("=" * 60)
 
     os.makedirs('history', exist_ok=True)
     elo_file = 'history/elo_ratings.json'
+
+    # Récupération de tous les modèles pour gérer l'ancre dynamique
+    models = sorted(glob.glob('history/model_step_*.onnx'))
+    if not models:
+        print("Aucun modèle trouvé dans le dossier 'history/'. En attente...")
+
+    # Ancre absolue : Le modèle 0 est strictement défini à 0 Elo
+    anchor_model = "model_step_000000.onnx"
 
     if os.path.exists(elo_file):
         with open(elo_file, 'r') as f:
             elo_ratings = json.load(f)
         print(f"📊 Dictionnaire Elo chargé ({len(elo_ratings)} modèles existants).")
     else:
-        # L'ancre absolue : Le tout premier modèle aléatoire vaut 0 Elo.
-        elo_ratings = {'gen_000.onnx': 0.0}
+        # Création du dictionnaire avec l'ancre à 0 Elo
+        elo_ratings = {anchor_model: 0.0}
         with open(elo_file, 'w') as f:
             json.dump(elo_ratings, f)
-        print("📊 Nouveau dictionnaire Elo créé (Ancre: gen_000 à 0 Elo).")
+        print(f"📊 Nouveau dictionnaire Elo créé (Ancre: {anchor_model} à 0 Elo).")
 
     log_dir = "logs/elo_tracking"
     os.makedirs(log_dir, exist_ok=True)
@@ -125,17 +133,19 @@ def main():
     with summary_writer.as_default():
         for model_name, elo in elo_ratings.items():
             try:
-                gen_num = int(model_name.replace('gen_', '').replace('.onnx', ''))
-                tf.summary.scalar('Elo_Rating', elo, step=gen_num)
+                # Extraction du step au lieu du gen_num
+                step_num = int(model_name.replace('model_step_', '').replace('.onnx', ''))
+                tf.summary.scalar('Elo_Rating', elo, step=step_num)
             except ValueError:
                 pass
         summary_writer.flush()
 
-    K_PER_GAME = 16  # K-factor par partie (standard FIDE / Echecs)
+    K_PER_GAME = 16  # K-factor par partie
 
     try:
         while True:
-            models = sorted(glob.glob('history/gen_*.onnx'))
+            # Recherche des checkpoints
+            models = sorted(glob.glob('history/model_step_*.onnx'))
             if len(models) < 2:
                 time.sleep(5)
                 continue
@@ -152,25 +162,28 @@ def main():
                 time.sleep(5)
                 continue
 
-            gen_num = int(model_to_evaluate.replace('gen_', '').replace('.onnx', ''))
+            step_num = int(model_to_evaluate.replace('model_step_', '').replace('.onnx', ''))
             path_a = f"history/{model_to_evaluate}"
 
             # --- CRÉATION DU POOL D'ADVERSAIRES (GAUNTLET) ---
             opponents = []
 
-            # 1. Le prédécesseur immédiat
-            pred = f"gen_{gen_num - 1:03d}.onnx"
-            if pred in elo_ratings:
+            # 1. Le prédécesseur immédiat (basé sur l'index de la liste triée, pas sur le nom)
+            basenames = [os.path.basename(m) for m in models]
+            current_idx = basenames.index(model_to_evaluate)
+            pred = basenames[current_idx - 1] if current_idx > 0 else None
+
+            if pred and pred in elo_ratings:
                 opponents.append(pred)
 
-            # 2. L'ancre absolue (Gen 0)
-            if "gen_000.onnx" in elo_ratings and "gen_000.onnx" not in opponents:
-                opponents.append("gen_000.onnx")
+            # 2. L'ancre absolue (Model 0)
+            if anchor_model in elo_ratings and anchor_model not in opponents:
+                opponents.append(anchor_model)
 
             # 3. Jusqu'à 2 modèles historiques aléatoires
             known_models = [m for m in elo_ratings.keys() if m not in opponents and m != model_to_evaluate]
             if len(known_models) > 0:
-                num_random = min(3, len(known_models))
+                num_random = min(2, len(known_models))
                 random_opps = np.random.choice(known_models, size=num_random, replace=False)
                 opponents.extend(random_opps)
 
@@ -179,9 +192,9 @@ def main():
             print(f"🎯 Opposants sélectionnés : {', '.join(opponents)}")
             print("-" * 60)
 
-            # On initialise son Elo de départ à celui de son prédécesseur (ou 0.0 par défaut)
-            current_elo = elo_ratings.get(pred, 0.0)
-            games_per_opponent = 20  # Valeur cible pour une évaluation robuste
+            # On initialise son Elo de départ à celui de son prédécesseur (ou 0.0)
+            current_elo = elo_ratings.get(pred, 0.0) if pred else 0.0
+            games_per_opponent = 20
 
             # Déroulement du Gauntlet
             total_score = 0
@@ -212,8 +225,9 @@ def main():
             with open(elo_file, 'w') as f:
                 json.dump(elo_ratings, f, indent=4)
 
+            # Log TensorBoard en utilisant le numéro de step exact sur l'axe X
             with summary_writer.as_default():
-                tf.summary.scalar('Elo_Rating', current_elo, step=gen_num)
+                tf.summary.scalar('Elo_Rating', current_elo, step=step_num)
                 summary_writer.flush()
 
     except KeyboardInterrupt:
